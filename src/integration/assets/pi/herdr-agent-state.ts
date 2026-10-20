@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=9
+// HERDR_INTEGRATION_VERSION=10
 // @ts-nocheck
 
 import net from "node:net";
@@ -184,6 +184,10 @@ export default function (pi) {
   let agentActive = false;
   let blockedCount = 0;
   let blockedMessage: string | undefined;
+  let busyActive = false;
+  let busyLabel: string | undefined;
+  let busyClearPending = false;
+  let busyClearToken = 0;
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
@@ -194,6 +198,11 @@ export default function (pi) {
     }
     if (agentActive) {
       return { state: "working" as const, message: undefined };
+    }
+    if (busyActive) {
+      // pi-subagents async children can still wake this session, so the run
+      // is not finished even though the current turn settled.
+      return { state: "working" as const, message: busyLabel };
     }
     return { state: "idle" as const, message: undefined };
   }
@@ -224,6 +233,38 @@ export default function (pi) {
     blockedCount += 1;
     blockedMessage = data.label;
     publishState();
+  });
+
+  // pi-subagents raises herdr:busy while its async children can still wake
+  // this session. Holding working at settlement keeps the pane out of idle
+  // while background work remains. A label change arrives as active=false
+  // followed by active=true within one tick, so clearing defers to a
+  // microtask and a same-tick re-raise invalidates the pending clear.
+  pi.events.on("herdr:busy", (data) => {
+    if (!rootSession) {
+      return;
+    }
+    const active = data?.active === true;
+    busyActive = active;
+    busyLabel = active && typeof data.label === "string" && data.label.length > 0 ? data.label : undefined;
+    if (active) {
+      busyClearToken += 1;
+      busyClearPending = false;
+      publishState();
+      return;
+    }
+    if (busyClearPending) {
+      return;
+    }
+    busyClearPending = true;
+    const token = busyClearToken;
+    queueMicrotask(() => {
+      if (token !== busyClearToken) {
+        return;
+      }
+      busyClearPending = false;
+      publishState();
+    });
   });
 
   pi.on("session_start", async (event, ctx) => {

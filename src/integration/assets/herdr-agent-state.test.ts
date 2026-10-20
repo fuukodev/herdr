@@ -370,6 +370,97 @@ test("Pi settlement preserves explicit blocked-state precedence", async () => {
   expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "idle"]);
 });
 
+test("Pi holds working while herdr:busy is active", async () => {
+  const requests = await startRecordingServer("pi-busy-hold");
+  const { eventHandlers, handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = piContext(() => idle);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "1 subagent (reviewer)" }, context);
+  await waitFor(() => requestStates(requests).length === 2);
+  expect(requestStates(requests)).toEqual(["idle", "working"]);
+  expect(requestMessages(requests)).toEqual([undefined, "1 subagent (reviewer)"]);
+
+  // pi-subagents async children can still wake the session, so settlement
+  // must not publish idle while the busy hold is raised.
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await Bun.sleep(25);
+  expect(requestStates(requests)).toEqual(["idle", "working"]);
+
+  eventHandlers.get("herdr:busy")?.({ active: false }, context);
+  await waitFor(() => requestStates(requests).length === 3);
+  expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
+
+  idle = false;
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 4);
+
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 5);
+  expect(requestStates(requests)).toEqual(["idle", "working", "idle", "working", "idle"]);
+});
+
+test("Pi absorbs a busy label-change pair without an idle flicker", async () => {
+  const requests = await startRecordingServer("pi-busy-label-pair");
+  const { eventHandlers, handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = piContext(() => true);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "2 subagents" }, context);
+  await waitFor(() => requestStates(requests).length === 2);
+  expect(requestMessages(requests)[1]).toBe("2 subagents");
+
+  // pi-subagents emits active=false immediately before active=true when only
+  // the label text changes. The pair must not publish a transient idle.
+  eventHandlers.get("herdr:busy")?.({ active: false }, context);
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "1 subagent (reviewer)" }, context);
+  await Bun.sleep(25);
+  expect(requestStates(requests)).toEqual(["idle", "working", "working"]);
+  expect(requestMessages(requests)).toEqual([undefined, "2 subagents", "1 subagent (reviewer)"]);
+
+  eventHandlers.get("herdr:busy")?.({ active: false }, context);
+  await waitFor(() => requestStates(requests).length === 4);
+  expect(requestStates(requests)).toEqual(["idle", "working", "working", "idle"]);
+});
+
+test("Pi keeps blocked precedence over herdr:busy", async () => {
+  const requests = await startRecordingServer("pi-busy-blocked");
+  const { eventHandlers, handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = piContext(() => true);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "1 subagent (reviewer)" }, context);
+  await waitFor(() => requestStates(requests).length === 2);
+
+  eventHandlers.get("herdr:blocked")?.({ active: true, label: "approval" }, context);
+  await waitFor(() => requestStates(requests).length === 3);
+  expect(requestStates(requests)).toEqual(["idle", "working", "blocked"]);
+
+  handlers.get("agent_settled")?.({}, context);
+  eventHandlers.get("herdr:busy")?.({ active: false }, context);
+  await Bun.sleep(25);
+  expect(requestStates(requests)).toEqual(["idle", "working", "blocked"]);
+
+  eventHandlers.get("herdr:blocked")?.({ active: false }, context);
+  await waitFor(() => requestStates(requests).length === 4);
+  expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "idle"]);
+});
+
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
   const { handlers, pi } = createExtensionHarness();
@@ -655,6 +746,12 @@ function requestStates(requests: unknown[]): unknown[] {
   return requests
     .filter((request) => isRecord(request) && request.method === "pane.report_agent")
     .map(requestState);
+}
+
+function requestMessages(requests: unknown[]): unknown[] {
+  return requests
+    .filter((request) => isRecord(request) && request.method === "pane.report_agent")
+    .map((request) => (isRecord(request.params) ? request.params.message : undefined));
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Pi sessions no longer drop to idle while async subagents are still running and can wake the session. The pane holds working with the active subagent label until the wake turn settles. Run `herdr integration install pi` to update.
+
 ## [0.9.5] - 2026-10-14
 
 This is a hotfix release for v0.9.4. See the v0.9.4 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.4
